@@ -2,15 +2,12 @@
   "name": "vrc-time-tracker",
   "version": "1.0.0",
   "description": "Track your VRChat playtime with a GitHub-style contribution calendar",
-  "main": "server.js",
+  "main": "scripts/track.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node scripts/track.js",
+    "add-user": "node scripts/add-user.js"
   },
   "dependencies": {
-    "sql.js": "^1.11.0",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
     "node-fetch": "^2.7.0",
     "tough-cookie": "^5.1.2"
   },
