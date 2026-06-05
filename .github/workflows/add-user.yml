@@ -1,0 +1,43 @@
+name: Add User to Track
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'VRChat display name to search and track'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  add-user:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --production
+
+      - name: Search and add user
+        run: node scripts/add-user.js "${{ github.event.inputs.username }}"
+        env:
+          VRCHAT_USERNAME: ${{ secrets.VRCHAT_USERNAME }}
+          VRCHAT_PASSWORD: ${{ secrets.VRCHAT_PASSWORD }}
+
+      - name: Commit new user
+        run: |
+          git config user.name "VRC Tracker Bot"
+          git config user.email "tracker-bot@users.noreply.github.com"
+          git add data/ public/data/
+          git diff --staged --quiet || git commit -m "➕ Add tracked user: ${{ github.event.inputs.username }}"
+          git push

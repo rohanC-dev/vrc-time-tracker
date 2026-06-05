@@ -380,6 +380,12 @@ body {
   font-size: 0.9rem;
 }
 
+.search-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
 /* ─── Back Button ────────────────────────────────────────── */
 .back-btn {
   display: inline-flex;

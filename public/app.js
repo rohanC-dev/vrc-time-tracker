@@ -15,10 +15,11 @@ const trackBtnText = document.getElementById('trackBtnText');
 
 let currentUserId = null;
 let searchTimeout = null;
+let allUsers = []; // Loaded from static JSON
 
 // ─── Initialize ─────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  checkApiStatus();
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadUsersIndex();
   setupSearch();
   setupNavigation();
 
@@ -30,42 +31,46 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-// ─── API Status Check ───────────────────────────────────────
-async function checkApiStatus() {
+// ─── Load Users Index ───────────────────────────────────────
+async function loadUsersIndex() {
   try {
-    const res = await fetch('/api/status');
-    const data = await res.json();
-    if (data.authenticated) {
+    const res = await fetch('/data/users.json');
+    if (res.ok) {
+      allUsers = await res.json();
       statusDot.className = 'status-dot online';
-      statusText.textContent = `Tracking ${data.trackedUsers} user${data.trackedUsers !== 1 ? 's' : ''}`;
+      statusText.textContent = `Tracking ${allUsers.length} user${allUsers.length !== 1 ? 's' : ''}`;
     } else {
-      statusDot.className = 'status-dot offline';
-      statusText.textContent = 'API not connected';
+      throw new Error('No data');
     }
   } catch {
     statusDot.className = 'status-dot offline';
-    statusText.textContent = 'Offline';
+    statusText.textContent = 'No users tracked yet';
+    allUsers = [];
   }
 }
 
-// ─── Search ─────────────────────────────────────────────────
+// ─── Search (client-side filter) ────────────────────────────
 function setupSearch() {
   searchInput.addEventListener('input', () => {
     clearTimeout(searchTimeout);
-    const query = searchInput.value.trim();
+    const query = searchInput.value.trim().toLowerCase();
 
-    if (query.length < 2) {
+    if (query.length < 1) {
       hideSearchResults();
       return;
     }
 
     searchSpinner.classList.add('active');
-    searchTimeout = setTimeout(() => performSearch(query), 400);
+    searchTimeout = setTimeout(() => performSearch(query), 150);
   });
 
   searchInput.addEventListener('focus', () => {
-    if (searchInput.value.trim().length >= 2) {
-      searchResults.classList.add('visible');
+    const query = searchInput.value.trim().toLowerCase();
+    if (query.length >= 1) {
+      performSearch(query);
+    } else if (allUsers.length > 0) {
+      // Show all users when focused with empty input
+      renderSearchResults(allUsers.slice(0, 10));
     }
   });
 
@@ -76,7 +81,6 @@ function setupSearch() {
     }
   });
 
-  // Keyboard navigation
   searchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       hideSearchResults();
@@ -85,40 +89,48 @@ function setupSearch() {
   });
 }
 
-async function performSearch(query) {
-  try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-    const users = await res.json();
+function performSearch(query) {
+  searchSpinner.classList.remove('active');
 
-    searchSpinner.classList.remove('active');
+  if (allUsers.length === 0) {
+    searchResults.innerHTML = `
+      <div class="search-no-results">
+        <p>No users tracked yet</p>
+        <p class="search-hint">Add users via GitHub Actions → "Add User to Track"</p>
+      </div>`;
+    searchResults.classList.add('visible');
+    return;
+  }
 
-    if (res.ok && users.length > 0) {
-      renderSearchResults(users);
-    } else if (res.ok && users.length === 0) {
-      searchResults.innerHTML = '<div class="search-no-results">No users found</div>';
-      searchResults.classList.add('visible');
-    } else {
-      const errMsg = users.error || 'Search failed';
-      searchResults.innerHTML = `<div class="search-no-results">${escapeHtml(errMsg)}</div>`;
-      searchResults.classList.add('visible');
-    }
-  } catch (err) {
-    searchSpinner.classList.remove('active');
-    searchResults.innerHTML = '<div class="search-no-results">Search unavailable — check API connection</div>';
+  // Fuzzy filter by display name
+  const matches = allUsers.filter(u =>
+    u.displayName.toLowerCase().includes(query)
+  );
+
+  if (matches.length > 0) {
+    renderSearchResults(matches.slice(0, 10));
+  } else {
+    searchResults.innerHTML = `
+      <div class="search-no-results">
+        <p>No tracked users match "${escapeHtml(query)}"</p>
+        <p class="search-hint">Add new users via GitHub Actions → "Add User to Track"</p>
+      </div>`;
     searchResults.classList.add('visible');
   }
 }
 
 function renderSearchResults(users) {
   searchResults.innerHTML = users.map(user => `
-    <div class="search-result-item" data-user-id="${escapeHtml(user.id)}" onclick="selectUser('${escapeHtml(user.id)}')">
-      <img class="search-result-avatar" src="${escapeHtml(user.avatarUrl || user.profilePicUrl)}" alt="" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%23161b22%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2255%22 text-anchor=%22middle%22 fill=%22%238b949e%22 font-size=%2240%22>?</text></svg>'">
+    <div class="search-result-item" onclick="selectUser('${escapeHtml(user.id)}')">
+      <img class="search-result-avatar"
+           src="${escapeHtml(user.avatarUrl || user.profilePicUrl)}"
+           alt=""
+           onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%23161b22%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2255%22 text-anchor=%22middle%22 fill=%22%238b949e%22 font-size=%2240%22>?</text></svg>'">
       <div class="search-result-info">
         <div class="search-result-name">${escapeHtml(user.displayName)}</div>
-        <div class="search-result-status">${escapeHtml(user.statusDescription || user.status || '')}</div>
+        <div class="search-result-status">${escapeHtml(user.statusDescription || user.trustRank || '')}</div>
       </div>
-      ${user.isTracked ? '<span class="search-result-badge tracked">Tracked</span>' : ''}
-      ${user.state === 'online' ? '<span class="search-result-badge online">Online</span>' : ''}
+      <span class="search-result-badge tracked">Tracked</span>
     </div>
   `).join('');
   searchResults.classList.add('visible');
@@ -135,7 +147,6 @@ async function selectUser(userId) {
   await loadUserProfile(userId);
 }
 
-// Make selectUser globally accessible for onclick handlers
 window.selectUser = selectUser;
 
 async function loadUserProfile(userId) {
@@ -147,32 +158,30 @@ async function loadUserProfile(userId) {
   profileSection.style.display = 'block';
   profileSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  try {
-    const res = await fetch(`/api/user/${encodeURIComponent(userId)}`);
-
-    if (res.status === 404) {
-      // User not tracked yet — track them first
-      await trackUser(userId);
-      // Retry
-      const retryRes = await fetch(`/api/user/${encodeURIComponent(userId)}`);
-      if (!retryRes.ok) throw new Error('Failed to load user');
-      const data = await retryRes.json();
-      renderProfile(data);
-    } else if (res.ok) {
-      const data = await res.json();
-      renderProfile(data);
-    } else {
-      throw new Error('Failed to load user');
-    }
-  } catch (err) {
-    console.error('Profile load error:', err);
-    document.getElementById('userName').textContent = 'Error loading profile';
+  // Find user in the index
+  const user = allUsers.find(u => u.id === userId);
+  if (!user) {
+    document.getElementById('userName').textContent = 'User not found';
+    renderCalendar([]);
+    return;
   }
+
+  // Load playtime data
+  let playtime = [];
+  try {
+    const res = await fetch(`/data/playtime/${encodeURIComponent(userId)}.json`);
+    if (res.ok) {
+      playtime = await res.json();
+    }
+  } catch {
+    playtime = [];
+  }
+
+  const stats = computeStats(playtime);
+  renderProfile(user, playtime, stats);
 }
 
-function renderProfile(data) {
-  const { user, playtime, stats } = data;
-
+function renderProfile(user, playtime, stats) {
   // User card
   const avatarUrl = user.profilePicUrl || user.avatarUrl;
   document.getElementById('userAvatar').src = avatarUrl || '';
@@ -180,72 +189,101 @@ function renderProfile(data) {
   document.getElementById('userTrust').textContent = user.trustRank || '';
   document.getElementById('userBio').textContent = user.bio || '';
 
-  // Track button state
-  if (user.isTracking) {
-    trackBtn.classList.add('tracking');
-    trackBtnText.textContent = 'Tracking';
-  } else {
-    trackBtn.classList.remove('tracking');
-    trackBtnText.textContent = 'Track User';
-  }
+  // Track button — always "Tracking" since this is a static site
+  trackBtn.classList.add('tracking');
+  trackBtnText.textContent = 'Tracking';
 
   // Stats
-  document.getElementById('statTotalHours').textContent = stats.totalHours || 0;
-  document.getElementById('statCurrentStreak').textContent = `${stats.currentStreak || 0}d`;
-  document.getElementById('statLongestStreak').textContent = `${stats.longestStreak || 0}d`;
-  document.getElementById('statDailyAvg').textContent = stats.dailyAverageHours || 0;
+  document.getElementById('statTotalHours').textContent = stats.totalHours;
+  document.getElementById('statCurrentStreak').textContent = `${stats.currentStreak}d`;
+  document.getElementById('statLongestStreak').textContent = `${stats.longestStreak}d`;
+  document.getElementById('statDailyAvg').textContent = stats.dailyAverageHours;
 
-  // Calendar
+  // Calendar header
   document.getElementById('calendarTotalLabel').textContent =
-    `${stats.totalHours || 0} hours in the last year`;
+    `${stats.totalHours} hours in the last year`;
 
   renderCalendar(playtime);
 
   // Tracking info
   if (user.trackedSince) {
-    const since = new Date(user.trackedSince + 'Z');
+    const since = new Date(user.trackedSince);
     document.getElementById('trackingSince').textContent =
-      `Tracked since ${since.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} — data builds up over time`;
+      `Tracked since ${since.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} — data updates every 5 minutes via GitHub Actions`;
   }
 }
 
-// ─── Track / Untrack ────────────────────────────────────────
-async function trackUser(userId) {
-  try {
-    const res = await fetch(`/api/track/${encodeURIComponent(userId)}`, { method: 'POST' });
-    const data = await res.json();
-    if (res.ok) {
-      trackBtn.classList.add('tracking');
-      trackBtnText.textContent = 'Tracking';
-      checkApiStatus(); // Update header count
-    }
-    return data;
-  } catch (err) {
-    console.error('Track error:', err);
+// ─── Stats Computation ──────────────────────────────────────
+function computeStats(playtimeData) {
+  if (!playtimeData || playtimeData.length === 0) {
+    return {
+      totalHours: 0,
+      totalMinutes: 0,
+      currentStreak: 0,
+      longestStreak: 0,
+      dailyAverage: 0,
+      dailyAverageHours: 0,
+      daysPlayed: 0,
+    };
   }
+
+  const totalMinutes = playtimeData.reduce((sum, p) => sum + p.minutes, 0);
+  const totalHours = Math.round((totalMinutes / 60) * 10) / 10;
+
+  const playDates = new Set(playtimeData.map(p => p.date));
+  const daysPlayed = playDates.size;
+  const dailyAverage = daysPlayed > 0 ? Math.round((totalMinutes / daysPlayed) * 10) / 10 : 0;
+
+  // Current streak
+  let currentStreak = 0;
+  const checkDate = new Date();
+  while (true) {
+    const dateStr = formatDate(checkDate);
+    if (playDates.has(dateStr)) {
+      currentStreak++;
+      checkDate.setDate(checkDate.getDate() - 1);
+    } else if (currentStreak === 0) {
+      // Check yesterday if today hasn't logged yet
+      checkDate.setDate(checkDate.getDate() - 1);
+      if (playDates.has(formatDate(checkDate))) {
+        currentStreak++;
+        checkDate.setDate(checkDate.getDate() - 1);
+      } else {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+
+  // Longest streak
+  let longestStreak = 0, streak = 0;
+  const sortedDates = [...playDates].sort();
+  for (let i = 0; i < sortedDates.length; i++) {
+    if (i === 0) {
+      streak = 1;
+    } else {
+      const prev = new Date(sortedDates[i - 1]);
+      const curr = new Date(sortedDates[i]);
+      const diff = Math.round((curr - prev) / (1000 * 60 * 60 * 24));
+      streak = diff === 1 ? streak + 1 : 1;
+    }
+    longestStreak = Math.max(longestStreak, streak);
+  }
+
+  return {
+    totalHours,
+    totalMinutes,
+    currentStreak,
+    longestStreak,
+    dailyAverage,
+    dailyAverageHours: Math.round((dailyAverage / 60) * 10) / 10,
+    daysPlayed,
+  };
 }
-
-trackBtn.addEventListener('click', async () => {
-  if (!currentUserId) return;
-
-  if (trackBtn.classList.contains('tracking')) {
-    // Untrack
-    try {
-      await fetch(`/api/untrack/${encodeURIComponent(currentUserId)}`, { method: 'POST' });
-      trackBtn.classList.remove('tracking');
-      trackBtnText.textContent = 'Track User';
-      checkApiStatus();
-    } catch (err) {
-      console.error('Untrack error:', err);
-    }
-  } else {
-    await trackUser(currentUserId);
-  }
-});
 
 // ─── Calendar Rendering ─────────────────────────────────────
 function renderCalendar(playtimeData) {
-  // Build a map of date → minutes
   const dataMap = {};
   if (playtimeData) {
     for (const entry of playtimeData) {
@@ -253,15 +291,13 @@ function renderCalendar(playtimeData) {
     }
   }
 
-  // Generate 53 weeks (371 days back from today)
   const today = new Date();
   const weeks = [];
   const months = [];
 
-  // Start from the nearest past Sunday to ~1 year ago
+  // Start from ~1 year ago, aligned to Sunday
   const startDate = new Date(today);
   startDate.setDate(startDate.getDate() - 364);
-  // Align to Sunday
   while (startDate.getDay() !== 0) {
     startDate.setDate(startDate.getDate() - 1);
   }
@@ -270,7 +306,6 @@ function renderCalendar(playtimeData) {
   let currentWeek = [];
   let lastMonth = -1;
 
-  // Find max minutes for level calculation
   const allMinutes = Object.values(dataMap);
   const maxMinutes = allMinutes.length > 0 ? Math.max(...allMinutes) : 60;
 
@@ -280,7 +315,6 @@ function renderCalendar(playtimeData) {
     const level = getLevel(minutes, maxMinutes);
     const dayOfWeek = currentDate.getDay();
 
-    // Track months
     const month = currentDate.getMonth();
     if (month !== lastMonth) {
       months.push({
@@ -290,14 +324,9 @@ function renderCalendar(playtimeData) {
       lastMonth = month;
     }
 
-    currentWeek.push({
-      date: dateStr,
-      minutes,
-      level,
-      dayOfWeek,
-    });
+    currentWeek.push({ date: dateStr, minutes, level, dayOfWeek });
 
-    if (dayOfWeek === 6 || currentDate.getTime() === today.getTime()) {
+    if (dayOfWeek === 6) {
       weeks.push(currentWeek);
       currentWeek = [];
     }
@@ -311,29 +340,24 @@ function renderCalendar(playtimeData) {
 
   // Render month labels
   calendarMonths.innerHTML = '';
-  const weekWidth = 16; // 13px + 3px gap
-  let lastMonthEnd = 0;
-
+  const weekWidth = 16;
   for (let i = 0; i < months.length; i++) {
     const m = months[i];
     const nextStart = i + 1 < months.length ? months[i + 1].weekIndex : weeks.length;
     const span = nextStart - m.weekIndex;
-
     const label = document.createElement('span');
     label.className = 'calendar-month-label';
     label.style.width = `${span * weekWidth}px`;
-    label.textContent = span >= 2 ? m.name : ''; // Hide if too narrow
+    label.textContent = span >= 2 ? m.name : '';
     calendarMonths.appendChild(label);
   }
 
-  // Render weeks
+  // Render grid
   calendarGrid.innerHTML = '';
-
   for (const week of weeks) {
     const weekEl = document.createElement('div');
     weekEl.className = 'calendar-week';
 
-    // Pad week start (if first week doesn't start on Sunday)
     for (let d = 0; d < week[0].dayOfWeek; d++) {
       const empty = document.createElement('div');
       empty.className = 'calendar-day';
@@ -347,11 +371,8 @@ function renderCalendar(playtimeData) {
       dayEl.setAttribute('data-level', day.level);
       dayEl.setAttribute('data-date', day.date);
       dayEl.setAttribute('data-minutes', day.minutes);
-
-      // Tooltip events
       dayEl.addEventListener('mouseenter', showTooltip);
       dayEl.addEventListener('mouseleave', hideTooltip);
-
       weekEl.appendChild(dayEl);
     }
 
@@ -381,27 +402,19 @@ function showTooltip(e) {
   const el = e.target;
   const date = el.getAttribute('data-date');
   const minutes = parseInt(el.getAttribute('data-minutes') || '0', 10);
-
   if (!date) return;
 
   const dateObj = new Date(date + 'T00:00:00');
   const dateStr = dateObj.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
+    weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
   });
 
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
   let timeStr;
-  if (minutes === 0) {
-    timeStr = 'No playtime';
-  } else if (hours > 0) {
-    timeStr = `${hours}h ${mins}m playtime`;
-  } else {
-    timeStr = `${mins}m playtime`;
-  }
+  if (minutes === 0) timeStr = 'No playtime';
+  else if (hours > 0) timeStr = `${hours}h ${mins}m playtime`;
+  else timeStr = `${mins}m playtime`;
 
   tooltip.innerHTML = `
     <div class="tooltip-date">${dateStr}</div>
@@ -430,9 +443,12 @@ function setupNavigation() {
 
   window.addEventListener('hashchange', () => {
     const hash = window.location.hash;
-    if (!hash || hash === '#/' || hash === '#') {
-      goBack();
-    }
+    if (!hash || hash === '#/' || hash === '#') goBack();
+  });
+
+  // Hide track button click (no backend to track/untrack)
+  trackBtn.addEventListener('click', () => {
+    // No-op on static site — users are tracked via GitHub Actions
   });
 }
 
