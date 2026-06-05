@@ -17,10 +17,6 @@ let currentUserId = null;
 let searchTimeout = null;
 let allUsers = []; // Loaded from static JSON
 
-// Configuration
-// Replace this with your actual Cloudflare Worker URL
-const WORKER_URL = 'https://your-worker-url.workers.dev';
-
 // ─── Initialize ─────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   await loadUsersIndex();
@@ -65,7 +61,7 @@ function setupSearch() {
     }
 
     searchSpinner.classList.add('active');
-    searchTimeout = setTimeout(() => performSearch(query), 500); // 500ms debounce for API calls
+    searchTimeout = setTimeout(() => performSearch(query), 150);
   });
 
   searchInput.addEventListener('focus', () => {
@@ -93,40 +89,31 @@ function setupSearch() {
   });
 }
 
-async function performSearch(query) {
-  // 1. Local search among currently tracked users
-  const localMatches = allUsers.filter(u =>
-    u.displayName.toLowerCase().includes(query)
-  ).map(u => ({ ...u, isTracked: true }));
-
-  // 2. Fetch live results from Worker (if configured)
-  let liveMatches = [];
-  if (WORKER_URL !== 'https://your-worker-url.workers.dev') {
-    try {
-      const res = await fetch(`${WORKER_URL}/search?q=${encodeURIComponent(query)}`);
-      if (res.ok) {
-        liveMatches = await res.json();
-      }
-    } catch (err) {
-      console.warn('Worker search failed:', err);
-    }
-  }
-
+function performSearch(query) {
   searchSpinner.classList.remove('active');
 
-  // Merge results, avoiding duplicates
-  const localIds = new Set(localMatches.map(u => u.id));
-  const newLiveMatches = liveMatches.filter(u => !localIds.has(u.id));
-  
-  const allMatches = [...localMatches, ...newLiveMatches];
+  if (allUsers.length === 0) {
+    searchResults.innerHTML = `
+      <div class="search-no-results">
+        <p>No users tracked yet</p>
+        <p class="search-hint">To get tracked, add the bot account as a friend in VRChat!</p>
+      </div>`;
+    searchResults.classList.add('visible');
+    return;
+  }
 
-  if (allMatches.length > 0) {
-    renderSearchResults(allMatches.slice(0, 10));
+  // Fuzzy filter by display name
+  const matches = allUsers.filter(u =>
+    u.displayName.toLowerCase().includes(query)
+  );
+
+  if (matches.length > 0) {
+    renderSearchResults(matches.slice(0, 10));
   } else {
     searchResults.innerHTML = `
       <div class="search-no-results">
-        <p>No users match "${escapeHtml(query)}"</p>
-        <p class="search-hint">Make sure you have configured your Cloudflare Worker URL in app.js</p>
+        <p>No tracked users match "${escapeHtml(query)}"</p>
+        <p class="search-hint">We aren't tracking you yet! Send a friend request to the bot in VRChat to start.</p>
       </div>`;
     searchResults.classList.add('visible');
   }
@@ -143,7 +130,7 @@ function renderSearchResults(users) {
         <div class="search-result-name">${escapeHtml(user.displayName)}</div>
         <div class="search-result-status">${escapeHtml(user.statusDescription || user.trustRank || '')}</div>
       </div>
-      ${user.isTracked ? '<span class="search-result-badge tracked">Tracked</span>' : ''}
+      <span class="search-result-badge tracked">Tracked</span>
     </div>
   `).join('');
   searchResults.classList.add('visible');
@@ -172,40 +159,29 @@ async function loadUserProfile(userId) {
   profileSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   // Find user in the index
-  let user = allUsers.find(u => u.id === userId);
-  let isTracked = true;
-
+  const user = allUsers.find(u => u.id === userId);
   if (!user) {
-    // If not in allUsers, it's a new user from live search.
-    // We don't have their full profile, so we'll mock it for now
-    // and show a prominent "Track User" button.
-    user = {
-      id: userId,
-      displayName: 'New User (Not Tracked)',
-      trustRank: 'Unknown',
-      bio: 'This user is not currently being tracked. Click "Track User" to begin tracking their playtime.'
-    };
-    isTracked = false;
+    document.getElementById('userName').textContent = 'User not found';
+    renderCalendar([]);
+    return;
   }
 
   // Load playtime data
   let playtime = [];
-  if (isTracked) {
-    try {
-      const res = await fetch(`/data/playtime/${encodeURIComponent(userId)}.json`);
-      if (res.ok) {
-        playtime = await res.json();
-      }
-    } catch {
-      playtime = [];
+  try {
+    const res = await fetch(`/data/playtime/${encodeURIComponent(userId)}.json`);
+    if (res.ok) {
+      playtime = await res.json();
     }
+  } catch {
+    playtime = [];
   }
 
   const stats = computeStats(playtime);
-  renderProfile(user, playtime, stats, isTracked);
+  renderProfile(user, playtime, stats);
 }
 
-function renderProfile(user, playtime, stats, isTracked) {
+function renderProfile(user, playtime, stats) {
   // User card
   const avatarUrl = user.profilePicUrl || user.avatarUrl;
   document.getElementById('userAvatar').src = avatarUrl || '';
@@ -213,48 +189,11 @@ function renderProfile(user, playtime, stats, isTracked) {
   document.getElementById('userTrust').textContent = user.trustRank || '';
   document.getElementById('userBio').textContent = user.bio || '';
 
-  // Track button
-  if (isTracked) {
-    trackBtn.classList.add('tracking');
-    trackBtnText.textContent = 'Tracking';
-    trackBtn.style.pointerEvents = 'none'; // Already tracked
-  } else {
-    trackBtn.classList.remove('tracking');
-    trackBtnText.textContent = 'Track User';
-    trackBtn.style.pointerEvents = 'auto';
-    
-    // Setup one-time click handler to call the Worker
-    trackBtn.onclick = async () => {
-      if (WORKER_URL === 'https://your-worker-url.workers.dev') {
-        alert('Please configure your Cloudflare Worker URL in app.js first.');
-        return;
-      }
-      
-      trackBtnText.textContent = 'Starting...';
-      try {
-        const res = await fetch(`${WORKER_URL}/track`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: user.displayName })
-        });
-        
-        if (res.ok) {
-          trackBtn.classList.add('tracking');
-          trackBtnText.textContent = 'Tracking Started';
-          trackBtn.style.pointerEvents = 'none';
-          document.getElementById('trackingSince').textContent = 
-            'Tracking requested! Data will begin updating shortly via GitHub Actions.';
-        } else {
-          const err = await res.json();
-          trackBtnText.textContent = 'Track User';
-          alert('Failed to start tracking: ' + err.error);
-        }
-      } catch (err) {
-        trackBtnText.textContent = 'Track User';
-        alert('Network error communicating with Worker.');
-      }
-    };
-  }
+  // Track button — always "Tracking" since this is a static site
+  trackBtn.classList.add('tracking');
+  trackBtnText.textContent = 'Tracking';
+  trackBtn.onclick = null;
+  trackBtn.style.pointerEvents = 'none';
 
   // Stats
   document.getElementById('statTotalHours').textContent = stats.totalHours;
@@ -508,8 +447,6 @@ function setupNavigation() {
     const hash = window.location.hash;
     if (!hash || hash === '#/' || hash === '#') goBack();
   });
-
-  // Track button is handled dynamically in renderProfile now
 }
 
 function goBack() {

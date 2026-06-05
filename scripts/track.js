@@ -1,8 +1,7 @@
 /**
- * Standalone VRChat tracker for GitHub Actions.
- * Runs for ~5h55m, polling tracked users every 5 minutes.
- * Writes playtime data to public/data/ as JSON files.
- * At the end, the GitHub Action commits and pushes the updated data.
+ * VRChat Auto-Friending Tracker for GitHub Actions
+ * Runs for ~5h55m, polling online friends every 5 minutes.
+ * Automatically accepts incoming friend requests to start tracking.
  */
 
 const fs = require('fs');
@@ -12,14 +11,12 @@ const { CookieJar } = require('tough-cookie');
 
 // ─── Config ─────────────────────────────────────────────────
 const ROOT = path.join(__dirname, '..');
-const CONFIG_PATH = path.join(ROOT, 'data', 'config.json');
 const USERS_PATH = path.join(ROOT, 'public', 'data', 'users.json');
 const PLAYTIME_DIR = path.join(ROOT, 'public', 'data', 'playtime');
 
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_RUNTIME_MS = 5 * 60 * 60 * 1000 + 55 * 60 * 1000; // 5h55m
-const REQUEST_DELAY_MS = 1500; // 1.5s between API calls
-const SAVE_INTERVAL_MS = 30 * 60 * 1000; // Save and commit every 30 minutes
+const SAVE_INTERVAL_MS = 30 * 60 * 1000; // Save checkpoint
 
 const BASE_URL = 'https://api.vrchat.cloud/api/1';
 const USER_AGENT = 'VRCTimeTracker/1.0.0 (https://github.com/vrc-time-tracker)';
@@ -63,59 +60,70 @@ class VRChatClient {
 
   async login(username, password) {
     console.log('[VRC] Logging in...');
-    try {
-      await this._fetch('/config');
-    } catch (e) { /* ignore */ }
+    try { await this._fetch('/config'); } catch (e) { /* ignore */ }
 
     const authHeader = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
     const res = await this._fetch('/auth/user', { headers: { Authorization: authHeader } });
 
-    if (!res.ok) throw new Error(`Login failed (${res.status}): ${await res.text()}`);
-
+    if (!res.ok) throw new Error(`Login failed (${res.status})`);
     const data = await res.json();
-    if (data.requiresTwoFactorAuth) {
-      throw new Error('2FA required — set VRCHAT_2FA_SECRET for automated 2FA, or disable 2FA on the bot account');
-    }
+    if (data.requiresTwoFactorAuth) throw new Error('2FA required on bot account');
 
     this.isAuthenticated = true;
     console.log(`[VRC] Logged in as: ${data.displayName}`);
     return data;
   }
 
-  async searchUsers(query, n = 10) {
-    const res = await this._fetch(`/users?search=${encodeURIComponent(query)}&n=${n}`);
-    if (!res.ok) throw new Error(`Search failed (${res.status})`);
-    return res.json();
+  async acceptFriendRequests() {
+    // 1. Get notifications
+    const res = await this._fetch('/auth/user/notifications?type=friendRequest');
+    if (!res.ok) return;
+    const notifications = await res.json();
+
+    const friendRequests = notifications.filter(n => n.type === 'friendRequest');
+    for (const req of friendRequests) {
+      console.log(`[VRC] Accepting friend request from ${req.senderUsername} (${req.senderUserId})`);
+      await this._fetch(`/auth/user/notifications/${req.id}/accept`, { method: 'PUT' });
+      // Mark as seen so it doesn't clutter
+      await this._fetch(`/auth/user/notifications/${req.id}`, { method: 'PUT' });
+      await sleep(1000);
+    }
   }
 
-  async getUserById(userId) {
-    const res = await this._fetch(`/users/${encodeURIComponent(userId)}`);
-    if (!res.ok) {
-      if (res.status === 404) return null;
-      throw new Error(`Get user failed (${res.status})`);
+  async getAllFriends() {
+    let friends = [];
+    let offset = 0;
+    while (true) {
+      const res = await this._fetch(`/auth/user/friends?offline=true&n=100&offset=${offset}`);
+      if (!res.ok) break;
+      const batch = await res.json();
+      if (batch.length === 0) break;
+      friends = friends.concat(batch);
+      offset += 100;
+      await sleep(500);
     }
-    return res.json();
+    return friends;
+  }
+
+  async getOnlineFriends() {
+    let friends = [];
+    let offset = 0;
+    while (true) {
+      const res = await this._fetch(`/auth/user/friends?offline=false&n=100&offset=${offset}`);
+      if (!res.ok) break;
+      const batch = await res.json();
+      if (batch.length === 0) break;
+      friends = friends.concat(batch);
+      offset += 100;
+      await sleep(500);
+    }
+    return friends;
   }
 }
 
 // ─── Data Management ────────────────────────────────────────
 function ensureDirs() {
-  fs.mkdirSync(path.join(ROOT, 'data'), { recursive: true });
   fs.mkdirSync(PLAYTIME_DIR, { recursive: true });
-  fs.mkdirSync(path.dirname(USERS_PATH), { recursive: true });
-}
-
-function loadConfig() {
-  if (!fs.existsSync(CONFIG_PATH)) {
-    const defaultConfig = { trackedUsers: [] };
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaultConfig, null, 2));
-    return defaultConfig;
-  }
-  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-}
-
-function saveConfig(config) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
 function loadUsersIndex() {
@@ -153,6 +161,10 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ─── Main Tracker Loop ──────────────────────────────────────
 async function main() {
   const username = process.env.VRCHAT_USERNAME;
@@ -168,137 +180,121 @@ async function main() {
   const client = new VRChatClient();
   await client.login(username, password);
 
-  const config = loadConfig();
-
-  if (config.trackedUsers.length === 0) {
-    console.log('[Track] No users to track. Add user IDs to data/config.json');
-    process.exit(0);
-  }
-
-  console.log(`[Track] Tracking ${config.trackedUsers.length} user(s)`);
-  console.log(`[Track] Poll interval: ${POLL_INTERVAL_MS / 60000}m, Max runtime: ${MAX_RUNTIME_MS / 3600000}h`);
+  console.log(`[Track] Tracker started. Poll interval: 5m, Max runtime: ~6h`);
 
   const startTime = Date.now();
   let pollCount = 0;
   let lastSaveTime = Date.now();
 
-  // Initial resolve: fetch user profiles for all tracked users
-  const usersIndex = loadUsersIndex();
-  const usersMap = {};
-  for (const u of usersIndex) usersMap[u.id] = u;
+  // Load existing users to preserve 'trackedSince'
+  const existingUsers = loadUsersIndex();
+  const trackedSinceMap = {};
+  for (const u of existingUsers) {
+    trackedSinceMap[u.id] = u.trackedSince || new Date().toISOString();
+  }
+
+  // Refresh full user list at start
+  console.log('[Track] Syncing full friend list...');
+  await client.acceptFriendRequests();
+  const allFriends = await client.getAllFriends();
+  
+  let usersMap = {};
+  for (const f of allFriends) {
+    usersMap[f.id] = {
+      id: f.id,
+      displayName: f.displayName,
+      bio: f.bio || '',
+      avatarUrl: f.currentAvatarThumbnailImageUrl || '',
+      profilePicUrl: f.profilePicOverride || f.currentAvatarThumbnailImageUrl || '',
+      statusDescription: f.statusDescription || '',
+      status: f.status || 'offline',
+      trustRank: extractTrustRank(f.tags),
+      trackedSince: trackedSinceMap[f.id] || new Date().toISOString(),
+    };
+  }
+  saveUsersIndex(Object.values(usersMap));
+  console.log(`[Track] Tracking ${Object.keys(usersMap).length} total friends.`);
 
   async function poll() {
     pollCount++;
     const elapsed = ((Date.now() - startTime) / 60000).toFixed(1);
     console.log(`\n[Track] Poll #${pollCount} (${elapsed}m elapsed)`);
 
-    let onlineCount = 0;
-    const today = todayStr();
-    const intervalMinutes = Math.round(POLL_INTERVAL_MS / 60000);
+    try {
+      // Accept any new friend requests
+      await client.acceptFriendRequests();
 
-    for (const userId of config.trackedUsers) {
-      try {
-        const user = await client.getUserById(userId);
-        if (!user) {
-          console.log(`  ⚠ ${userId}: not found`);
-          continue;
+      // Get only online friends
+      const onlineFriends = await client.getOnlineFriends();
+      console.log(`[Track] ${onlineFriends.length} friends online.`);
+
+      const today = todayStr();
+      const intervalMinutes = Math.round(POLL_INTERVAL_MS / 60000);
+
+      for (const friend of onlineFriends) {
+        // Ensure user is in our local map
+        if (!usersMap[friend.id]) {
+          console.log(`[Track] New friend detected: ${friend.displayName}`);
+          usersMap[friend.id] = {
+            id: friend.id,
+            displayName: friend.displayName,
+            bio: friend.bio || '',
+            avatarUrl: friend.currentAvatarThumbnailImageUrl || '',
+            profilePicUrl: friend.profilePicOverride || friend.currentAvatarThumbnailImageUrl || '',
+            statusDescription: friend.statusDescription || '',
+            status: friend.status || 'online',
+            trustRank: extractTrustRank(friend.tags),
+            trackedSince: new Date().toISOString(),
+          };
+        } else {
+          // Update volatile fields
+          usersMap[friend.id].statusDescription = friend.statusDescription || '';
+          usersMap[friend.id].status = friend.status || 'online';
         }
 
-        // Update user index
-        usersMap[user.id] = {
-          id: user.id,
-          displayName: user.displayName,
-          bio: user.bio || '',
-          avatarUrl: user.currentAvatarThumbnailImageUrl || '',
-          profilePicUrl: user.profilePicOverride || user.currentAvatarThumbnailImageUrl || '',
-          statusDescription: user.statusDescription || '',
-          status: user.status || 'offline',
-          state: user.state || 'offline',
-          trustRank: extractTrustRank(user.tags),
-          lastChecked: new Date().toISOString(),
-        };
-
-        const isOnline = user.state === 'online' || user.state === 'active';
-        const statusIcon = isOnline ? '🟢' : '⚫';
-        console.log(`  ${statusIcon} ${user.displayName}: ${user.state}`);
-
-        if (isOnline) {
-          onlineCount++;
-          // Load playtime data and add today's minutes
-          const playtime = loadPlaytime(userId);
-          const todayEntry = playtime.find(p => p.date === today);
-          if (todayEntry) {
-            todayEntry.minutes += intervalMinutes;
-          } else {
-            playtime.push({ date: today, minutes: intervalMinutes });
-          }
-          savePlaytime(userId, playtime);
+        // Log Playtime
+        const playtime = loadPlaytime(friend.id);
+        const todayEntry = playtime.find(p => p.date === today);
+        if (todayEntry) {
+          todayEntry.minutes += intervalMinutes;
+        } else {
+          playtime.push({ date: today, minutes: intervalMinutes });
         }
+        savePlaytime(friend.id, playtime);
+      }
 
-        // Rate limit between requests
-        await sleep(REQUEST_DELAY_MS);
-      } catch (err) {
-        console.error(`  ❌ ${userId}: ${err.message}`);
-        if (err.message.includes('401')) {
-          console.log('[Track] Auth expired, attempting re-login...');
-          try {
-            await client.login(username, password);
-          } catch (loginErr) {
-            console.error('[Track] Re-login failed:', loginErr.message);
-          }
-        }
+      saveUsersIndex(Object.values(usersMap));
+
+    } catch (err) {
+      console.error(`[Track] Poll error: ${err.message}`);
+      if (err.message.includes('401')) {
+        console.log('[Track] Auth expired, attempting re-login...');
+        try { await client.login(username, password); } catch (e) {}
       }
     }
 
-    // Save users index
-    saveUsersIndex(Object.values(usersMap));
-
-    console.log(`[Track] ${onlineCount}/${config.trackedUsers.length} users online`);
-
-    // Periodic save (commit signal for the workflow)
     if (Date.now() - lastSaveTime > SAVE_INTERVAL_MS) {
       console.log('[Track] Periodic save checkpoint');
       lastSaveTime = Date.now();
     }
   }
 
-  // Run first poll immediately
   await poll();
 
-  // Then poll on interval until max runtime
   return new Promise((resolve) => {
     const interval = setInterval(async () => {
-      const elapsed = Date.now() - startTime;
-      if (elapsed >= MAX_RUNTIME_MS) {
+      if (Date.now() - startTime >= MAX_RUNTIME_MS) {
         console.log('\n[Track] Max runtime reached. Shutting down gracefully...');
         clearInterval(interval);
-        // Final save
-        saveUsersIndex(Object.values(usersMap));
         resolve();
         return;
       }
       await poll();
     }, POLL_INTERVAL_MS);
 
-    // Also handle graceful shutdown
-    process.on('SIGTERM', () => {
-      console.log('\n[Track] SIGTERM received. Saving and shutting down...');
-      clearInterval(interval);
-      saveUsersIndex(Object.values(usersMap));
-      resolve();
-    });
-
-    process.on('SIGINT', () => {
-      console.log('\n[Track] SIGINT received. Saving and shutting down...');
-      clearInterval(interval);
-      saveUsersIndex(Object.values(usersMap));
-      resolve();
-    });
+    process.on('SIGTERM', () => { clearInterval(interval); resolve(); });
+    process.on('SIGINT', () => { clearInterval(interval); resolve(); });
   });
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 main()
