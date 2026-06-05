@@ -17,6 +17,10 @@ let currentUserId = null;
 let searchTimeout = null;
 let allUsers = []; // Loaded from static JSON
 
+// Configuration
+// Replace this with your actual Cloudflare Worker URL
+const WORKER_URL = 'https://your-worker-url.workers.dev';
+
 // ─── Initialize ─────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   await loadUsersIndex();
@@ -61,7 +65,7 @@ function setupSearch() {
     }
 
     searchSpinner.classList.add('active');
-    searchTimeout = setTimeout(() => performSearch(query), 150);
+    searchTimeout = setTimeout(() => performSearch(query), 500); // 500ms debounce for API calls
   });
 
   searchInput.addEventListener('focus', () => {
@@ -89,31 +93,40 @@ function setupSearch() {
   });
 }
 
-function performSearch(query) {
-  searchSpinner.classList.remove('active');
+async function performSearch(query) {
+  // 1. Local search among currently tracked users
+  const localMatches = allUsers.filter(u =>
+    u.displayName.toLowerCase().includes(query)
+  ).map(u => ({ ...u, isTracked: true }));
 
-  if (allUsers.length === 0) {
-    searchResults.innerHTML = `
-      <div class="search-no-results">
-        <p>No users tracked yet</p>
-        <p class="search-hint">Add users via GitHub Actions → "Add User to Track"</p>
-      </div>`;
-    searchResults.classList.add('visible');
-    return;
+  // 2. Fetch live results from Worker (if configured)
+  let liveMatches = [];
+  if (WORKER_URL !== 'https://your-worker-url.workers.dev') {
+    try {
+      const res = await fetch(`${WORKER_URL}/search?q=${encodeURIComponent(query)}`);
+      if (res.ok) {
+        liveMatches = await res.json();
+      }
+    } catch (err) {
+      console.warn('Worker search failed:', err);
+    }
   }
 
-  // Fuzzy filter by display name
-  const matches = allUsers.filter(u =>
-    u.displayName.toLowerCase().includes(query)
-  );
+  searchSpinner.classList.remove('active');
 
-  if (matches.length > 0) {
-    renderSearchResults(matches.slice(0, 10));
+  // Merge results, avoiding duplicates
+  const localIds = new Set(localMatches.map(u => u.id));
+  const newLiveMatches = liveMatches.filter(u => !localIds.has(u.id));
+  
+  const allMatches = [...localMatches, ...newLiveMatches];
+
+  if (allMatches.length > 0) {
+    renderSearchResults(allMatches.slice(0, 10));
   } else {
     searchResults.innerHTML = `
       <div class="search-no-results">
-        <p>No tracked users match "${escapeHtml(query)}"</p>
-        <p class="search-hint">Add new users via GitHub Actions → "Add User to Track"</p>
+        <p>No users match "${escapeHtml(query)}"</p>
+        <p class="search-hint">Make sure you have configured your Cloudflare Worker URL in app.js</p>
       </div>`;
     searchResults.classList.add('visible');
   }
@@ -130,7 +143,7 @@ function renderSearchResults(users) {
         <div class="search-result-name">${escapeHtml(user.displayName)}</div>
         <div class="search-result-status">${escapeHtml(user.statusDescription || user.trustRank || '')}</div>
       </div>
-      <span class="search-result-badge tracked">Tracked</span>
+      ${user.isTracked ? '<span class="search-result-badge tracked">Tracked</span>' : ''}
     </div>
   `).join('');
   searchResults.classList.add('visible');
@@ -159,29 +172,40 @@ async function loadUserProfile(userId) {
   profileSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   // Find user in the index
-  const user = allUsers.find(u => u.id === userId);
+  let user = allUsers.find(u => u.id === userId);
+  let isTracked = true;
+
   if (!user) {
-    document.getElementById('userName').textContent = 'User not found';
-    renderCalendar([]);
-    return;
+    // If not in allUsers, it's a new user from live search.
+    // We don't have their full profile, so we'll mock it for now
+    // and show a prominent "Track User" button.
+    user = {
+      id: userId,
+      displayName: 'New User (Not Tracked)',
+      trustRank: 'Unknown',
+      bio: 'This user is not currently being tracked. Click "Track User" to begin tracking their playtime.'
+    };
+    isTracked = false;
   }
 
   // Load playtime data
   let playtime = [];
-  try {
-    const res = await fetch(`/data/playtime/${encodeURIComponent(userId)}.json`);
-    if (res.ok) {
-      playtime = await res.json();
+  if (isTracked) {
+    try {
+      const res = await fetch(`/data/playtime/${encodeURIComponent(userId)}.json`);
+      if (res.ok) {
+        playtime = await res.json();
+      }
+    } catch {
+      playtime = [];
     }
-  } catch {
-    playtime = [];
   }
 
   const stats = computeStats(playtime);
-  renderProfile(user, playtime, stats);
+  renderProfile(user, playtime, stats, isTracked);
 }
 
-function renderProfile(user, playtime, stats) {
+function renderProfile(user, playtime, stats, isTracked) {
   // User card
   const avatarUrl = user.profilePicUrl || user.avatarUrl;
   document.getElementById('userAvatar').src = avatarUrl || '';
@@ -189,9 +213,48 @@ function renderProfile(user, playtime, stats) {
   document.getElementById('userTrust').textContent = user.trustRank || '';
   document.getElementById('userBio').textContent = user.bio || '';
 
-  // Track button — always "Tracking" since this is a static site
-  trackBtn.classList.add('tracking');
-  trackBtnText.textContent = 'Tracking';
+  // Track button
+  if (isTracked) {
+    trackBtn.classList.add('tracking');
+    trackBtnText.textContent = 'Tracking';
+    trackBtn.style.pointerEvents = 'none'; // Already tracked
+  } else {
+    trackBtn.classList.remove('tracking');
+    trackBtnText.textContent = 'Track User';
+    trackBtn.style.pointerEvents = 'auto';
+    
+    // Setup one-time click handler to call the Worker
+    trackBtn.onclick = async () => {
+      if (WORKER_URL === 'https://your-worker-url.workers.dev') {
+        alert('Please configure your Cloudflare Worker URL in app.js first.');
+        return;
+      }
+      
+      trackBtnText.textContent = 'Starting...';
+      try {
+        const res = await fetch(`${WORKER_URL}/track`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: user.displayName })
+        });
+        
+        if (res.ok) {
+          trackBtn.classList.add('tracking');
+          trackBtnText.textContent = 'Tracking Started';
+          trackBtn.style.pointerEvents = 'none';
+          document.getElementById('trackingSince').textContent = 
+            'Tracking requested! Data will begin updating shortly via GitHub Actions.';
+        } else {
+          const err = await res.json();
+          trackBtnText.textContent = 'Track User';
+          alert('Failed to start tracking: ' + err.error);
+        }
+      } catch (err) {
+        trackBtnText.textContent = 'Track User';
+        alert('Network error communicating with Worker.');
+      }
+    };
+  }
 
   // Stats
   document.getElementById('statTotalHours').textContent = stats.totalHours;
@@ -446,10 +509,7 @@ function setupNavigation() {
     if (!hash || hash === '#/' || hash === '#') goBack();
   });
 
-  // Hide track button click (no backend to track/untrack)
-  trackBtn.addEventListener('click', () => {
-    // No-op on static site — users are tracked via GitHub Actions
-  });
+  // Track button is handled dynamically in renderProfile now
 }
 
 function goBack() {
