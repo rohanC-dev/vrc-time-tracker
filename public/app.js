@@ -17,6 +17,16 @@ let currentUserId = null;
 let searchTimeout = null;
 let allUsers = []; // Loaded from static JSON
 
+// ─── Configuration ──────────────────────────────────────────
+// 1. Enter your GitHub repository (e.g. rohanC-dev/vrc-time-tracker)
+const GITHUB_REPO = 'rohanC-dev/vrc-time-tracker';
+
+// 2. Base64 encode your GitHub PAT to hide it from simple scanners.
+//    In your browser console, run: btoa('ghp_your_token_here') and paste the result below.
+//    WARNING: This token is technically exposed to anyone who inspects the code.
+//    Make sure it is a Fine-Grained PAT restricted ONLY to Action Read/Write on this specific repo!
+const OBFUSCATED_GITHUB_TOKEN = 'YOUR_BASE64_ENCODED_TOKEN_HERE'; 
+
 // ─── Initialize ─────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   await loadUsersIndex();
@@ -95,8 +105,10 @@ function performSearch(query) {
   if (allUsers.length === 0) {
     searchResults.innerHTML = `
       <div class="search-no-results">
-        <p>No users tracked yet</p>
-        <p class="search-hint">To get tracked, add the bot account as a friend in VRChat!</p>
+        <p>No users tracked yet.</p>
+        <button class="track-btn" style="margin-top: 12px; font-size: 0.8rem; padding: 8px 16px;" onclick="triggerTrackWorkflow('${escapeHtml(query)}')">
+          Track "${escapeHtml(query)}"
+        </button>
       </div>`;
     searchResults.classList.add('visible');
     return;
@@ -108,33 +120,90 @@ function performSearch(query) {
   );
 
   if (matches.length > 0) {
-    renderSearchResults(matches.slice(0, 10));
+    // If there's no exact match, add a 'Track' button at the bottom
+    const hasExactMatch = matches.some(u => u.displayName.toLowerCase() === query);
+    
+    let html = matches.slice(0, 10).map(user => `
+      <div class="search-result-item" onclick="selectUser('${escapeHtml(user.id)}')">
+        <img class="search-result-avatar"
+             src="${escapeHtml(user.avatarUrl || user.profilePicUrl)}"
+             alt=""
+             onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%23161b22%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2255%22 text-anchor=%22middle%22 fill=%22%238b949e%22 font-size=%2240%22>?</text></svg>'">
+        <div class="search-result-info">
+          <div class="search-result-name">${escapeHtml(user.displayName)}</div>
+          <div class="search-result-status">${escapeHtml(user.statusDescription || user.trustRank || '')}</div>
+        </div>
+        <span class="search-result-badge tracked">Tracked</span>
+      </div>
+    `).join('');
+
+    if (!hasExactMatch) {
+      html += `
+        <div class="search-no-results" style="border-top: 1px solid var(--border-light);">
+          <p>Don't see who you're looking for?</p>
+          <button class="track-btn" style="margin-top: 8px; font-size: 0.8rem; padding: 6px 12px;" onclick="triggerTrackWorkflow('${escapeHtml(query)}')">
+            Track "${escapeHtml(query)}"
+          </button>
+        </div>`;
+    }
+
+    searchResults.innerHTML = html;
+    searchResults.classList.add('visible');
   } else {
     searchResults.innerHTML = `
       <div class="search-no-results">
         <p>No tracked users match "${escapeHtml(query)}"</p>
-        <p class="search-hint">We aren't tracking you yet! Send a friend request to the bot in VRChat to start.</p>
+        <button class="track-btn" style="margin-top: 12px; font-size: 0.8rem; padding: 8px 16px;" onclick="triggerTrackWorkflow('${escapeHtml(query)}')">
+          Track "${escapeHtml(query)}"
+        </button>
       </div>`;
     searchResults.classList.add('visible');
   }
 }
 
-function renderSearchResults(users) {
-  searchResults.innerHTML = users.map(user => `
-    <div class="search-result-item" onclick="selectUser('${escapeHtml(user.id)}')">
-      <img class="search-result-avatar"
-           src="${escapeHtml(user.avatarUrl || user.profilePicUrl)}"
-           alt=""
-           onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%23161b22%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2255%22 text-anchor=%22middle%22 fill=%22%238b949e%22 font-size=%2240%22>?</text></svg>'">
-      <div class="search-result-info">
-        <div class="search-result-name">${escapeHtml(user.displayName)}</div>
-        <div class="search-result-status">${escapeHtml(user.statusDescription || user.trustRank || '')}</div>
-      </div>
-      <span class="search-result-badge tracked">Tracked</span>
-    </div>
-  `).join('');
-  searchResults.classList.add('visible');
+async function triggerTrackWorkflow(username) {
+  if (OBFUSCATED_GITHUB_TOKEN === 'YOUR_BASE64_ENCODED_TOKEN_HERE') {
+    alert('You must configure your OBFUSCATED_GITHUB_TOKEN in app.js first!');
+    return;
+  }
+
+  const btn = event.currentTarget;
+  btn.textContent = 'Triggering...';
+  btn.style.pointerEvents = 'none';
+  btn.style.opacity = '0.7';
+
+  try {
+    const token = atob(OBFUSCATED_GITHUB_TOKEN);
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/add-user.yml/dispatches`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        ref: 'master',
+        inputs: { username: username }
+      })
+    });
+
+    if (res.ok) {
+      btn.textContent = 'Tracking Started!';
+      btn.classList.add('tracking');
+      alert(`Tracking started for "${username}". It may take up to 5 minutes to appear in search as data gathers.`);
+      hideSearchResults();
+      searchInput.value = '';
+    } else {
+      const err = await res.text();
+      throw new Error(err);
+    }
+  } catch (e) {
+    btn.textContent = 'Error';
+    alert('Failed to trigger tracking. Is your token correct? Error: ' + e.message);
+  }
 }
+
+
 
 function hideSearchResults() {
   searchResults.classList.remove('visible');

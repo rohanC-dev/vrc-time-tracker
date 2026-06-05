@@ -11,6 +11,7 @@ const { CookieJar } = require('tough-cookie');
 
 // ─── Config ─────────────────────────────────────────────────
 const ROOT = path.join(__dirname, '..');
+const CONFIG_PATH = path.join(ROOT, 'data', 'config.json');
 const USERS_PATH = path.join(ROOT, 'public', 'data', 'users.json');
 const PLAYTIME_DIR = path.join(ROOT, 'public', 'data', 'playtime');
 
@@ -74,56 +75,25 @@ class VRChatClient {
     return data;
   }
 
-  async acceptFriendRequests() {
-    // 1. Get notifications
-    const res = await this._fetch('/auth/user/notifications?type=friendRequest');
-    if (!res.ok) return;
-    const notifications = await res.json();
-
-    const friendRequests = notifications.filter(n => n.type === 'friendRequest');
-    for (const req of friendRequests) {
-      console.log(`[VRC] Accepting friend request from ${req.senderUsername} (${req.senderUserId})`);
-      await this._fetch(`/auth/user/notifications/${req.id}/accept`, { method: 'PUT' });
-      // Mark as seen so it doesn't clutter
-      await this._fetch(`/auth/user/notifications/${req.id}`, { method: 'PUT' });
-      await sleep(1000);
+  async getUserInfo(userId) {
+    const res = await this._fetch(`/users/${userId}`);
+    if (!res.ok) {
+      if (res.status === 404) return null;
+      throw new Error(`Failed to fetch user ${userId}`);
     }
-  }
-
-  async getAllFriends() {
-    let friends = [];
-    let offset = 0;
-    while (true) {
-      const res = await this._fetch(`/auth/user/friends?offline=true&n=100&offset=${offset}`);
-      if (!res.ok) break;
-      const batch = await res.json();
-      if (batch.length === 0) break;
-      friends = friends.concat(batch);
-      offset += 100;
-      await sleep(500);
-    }
-    return friends;
-  }
-
-  async getOnlineFriends() {
-    let friends = [];
-    let offset = 0;
-    while (true) {
-      const res = await this._fetch(`/auth/user/friends?offline=false&n=100&offset=${offset}`);
-      if (!res.ok) break;
-      const batch = await res.json();
-      if (batch.length === 0) break;
-      friends = friends.concat(batch);
-      offset += 100;
-      await sleep(500);
-    }
-    return friends;
+    return await res.json();
   }
 }
 
 // ─── Data Management ────────────────────────────────────────
 function ensureDirs() {
   fs.mkdirSync(PLAYTIME_DIR, { recursive: true });
+  fs.mkdirSync(path.join(ROOT, 'data'), { recursive: true });
+}
+
+function loadConfig() {
+  if (!fs.existsSync(CONFIG_PATH)) return { trackedUsers: [] };
+  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 }
 
 function loadUsersIndex() {
@@ -193,27 +163,10 @@ async function main() {
     trackedSinceMap[u.id] = u.trackedSince || new Date().toISOString();
   }
 
-  // Refresh full user list at start
-  console.log('[Track] Syncing full friend list...');
-  await client.acceptFriendRequests();
-  const allFriends = await client.getAllFriends();
-  
   let usersMap = {};
-  for (const f of allFriends) {
-    usersMap[f.id] = {
-      id: f.id,
-      displayName: f.displayName,
-      bio: f.bio || '',
-      avatarUrl: f.currentAvatarThumbnailImageUrl || '',
-      profilePicUrl: f.profilePicOverride || f.currentAvatarThumbnailImageUrl || '',
-      statusDescription: f.statusDescription || '',
-      status: f.status || 'offline',
-      trustRank: extractTrustRank(f.tags),
-      trackedSince: trackedSinceMap[f.id] || new Date().toISOString(),
-    };
+  for (const u of existingUsers) {
+    usersMap[u.id] = u;
   }
-  saveUsersIndex(Object.values(usersMap));
-  console.log(`[Track] Tracking ${Object.keys(usersMap).length} total friends.`);
 
   async function poll() {
     pollCount++;
@@ -221,46 +174,45 @@ async function main() {
     console.log(`\n[Track] Poll #${pollCount} (${elapsed}m elapsed)`);
 
     try {
-      // Accept any new friend requests
-      await client.acceptFriendRequests();
-
-      // Get only online friends
-      const onlineFriends = await client.getOnlineFriends();
-      console.log(`[Track] ${onlineFriends.length} friends online.`);
+      const config = loadConfig();
+      const targetIds = config.trackedUsers || [];
+      console.log(`[Track] Polling ${targetIds.length} users...`);
 
       const today = todayStr();
       const intervalMinutes = Math.round(POLL_INTERVAL_MS / 60000);
 
-      for (const friend of onlineFriends) {
-        // Ensure user is in our local map
-        if (!usersMap[friend.id]) {
-          console.log(`[Track] New friend detected: ${friend.displayName}`);
-          usersMap[friend.id] = {
-            id: friend.id,
-            displayName: friend.displayName,
-            bio: friend.bio || '',
-            avatarUrl: friend.currentAvatarThumbnailImageUrl || '',
-            profilePicUrl: friend.profilePicOverride || friend.currentAvatarThumbnailImageUrl || '',
-            statusDescription: friend.statusDescription || '',
-            status: friend.status || 'online',
-            trustRank: extractTrustRank(friend.tags),
-            trackedSince: new Date().toISOString(),
-          };
-        } else {
-          // Update volatile fields
-          usersMap[friend.id].statusDescription = friend.statusDescription || '';
-          usersMap[friend.id].status = friend.status || 'online';
+      for (const userId of targetIds) {
+        // Individual polling (RISKY - easily rate limited)
+        const user = await client.getUserInfo(userId);
+        if (!user) continue;
+
+        usersMap[userId] = {
+          id: user.id,
+          displayName: user.displayName,
+          bio: user.bio || '',
+          avatarUrl: user.currentAvatarThumbnailImageUrl || '',
+          profilePicUrl: user.profilePicOverride || user.currentAvatarThumbnailImageUrl || '',
+          statusDescription: user.statusDescription || '',
+          status: user.status || 'offline',
+          trustRank: extractTrustRank(user.tags),
+          trackedSince: trackedSinceMap[userId] || new Date().toISOString(),
+        };
+
+        // If they are online (or actively playing in a private world if status exposes it), increment playtime
+        // Note: For non-friends, status may just be 'offline' if in a private world.
+        if (user.status !== 'offline') {
+          const playtime = loadPlaytime(userId);
+          const todayEntry = playtime.find(p => p.date === today);
+          if (todayEntry) {
+            todayEntry.minutes += intervalMinutes;
+          } else {
+            playtime.push({ date: today, minutes: intervalMinutes });
+          }
+          savePlaytime(userId, playtime);
         }
 
-        // Log Playtime
-        const playtime = loadPlaytime(friend.id);
-        const todayEntry = playtime.find(p => p.date === today);
-        if (todayEntry) {
-          todayEntry.minutes += intervalMinutes;
-        } else {
-          playtime.push({ date: today, minutes: intervalMinutes });
-        }
-        savePlaytime(friend.id, playtime);
+        // Sleep to avoid blasting the API and getting insta-banned
+        await sleep(2000); 
       }
 
       saveUsersIndex(Object.values(usersMap));
