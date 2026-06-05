@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VRC Time Tracker — Track Your VRChat Playtime</title>
+  <meta name="description" content="Track your VRChat playtime with a beautiful GitHub-style contribution calendar. Search any user and visualize their play history.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- ─── Background Particles ──────────────────────────── -->
+  <div class="bg-particles" id="bgParticles"></div>
+
+  <!-- ─── Header ─────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-inner">
+      <a href="/" class="logo" id="logoLink">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </div>
+        <span class="logo-text">VRC<span class="logo-accent">Time</span></span>
+      </a>
+      <div class="header-status" id="headerStatus">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Connecting...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ─── Main Content ───────────────────────────────────── -->
+  <main class="main">
+    <!-- Hero / Search Section -->
+    <section class="hero" id="heroSection">
+      <div class="hero-content">
+        <h1 class="hero-title">
+          Track Your <span class="gradient-text">VRChat</span> Playtime
+        </h1>
+        <p class="hero-subtitle">
+          Search for any VRChat user to visualize their play history with a GitHub-style contribution calendar
+        </p>
+        <div class="search-container" id="searchContainer">
+          <div class="search-input-wrap">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input
+              type="text"
+              class="search-input"
+              id="searchInput"
+              placeholder="Search VRChat username..."
+              autocomplete="off"
+              spellcheck="false"
+            >
+            <div class="search-spinner" id="searchSpinner"></div>
+          </div>
+          <div class="search-results" id="searchResults"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Profile Section (hidden by default) -->
+    <section class="profile-section" id="profileSection" style="display: none;">
+      <!-- Back Button -->
+      <button class="back-btn" id="backBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="19" y1="12" x2="5" y2="12"/>
+          <polyline points="12 19 5 12 12 5"/>
+        </svg>
+        Back to Search
+      </button>
+
+      <!-- User Card -->
+      <div class="user-card" id="userCard">
+        <div class="user-card-bg"></div>
+        <div class="user-card-content">
+          <div class="user-avatar-wrap">
+            <img class="user-avatar" id="userAvatar" src="" alt="Avatar">
+            <div class="user-status-badge" id="userStatusBadge"></div>
+          </div>
+          <div class="user-info">
+            <h2 class="user-name" id="userName">Loading...</h2>
+            <p class="user-trust" id="userTrust"></p>
+            <p class="user-bio" id="userBio"></p>
+          </div>
+          <button class="track-btn" id="trackBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+            </svg>
+            <span id="trackBtnText">Track User</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Stats Cards -->
+      <div class="stats-grid" id="statsGrid">
+        <div class="stat-card">
+          <div class="stat-value" id="statTotalHours">0</div>
+          <div class="stat-label">Total Hours</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="statCurrentStreak">0</div>
+          <div class="stat-label">Current Streak</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="statLongestStreak">0</div>
+          <div class="stat-label">Longest Streak</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="statDailyAvg">0</div>
+          <div class="stat-label">Avg Hours / Day</div>
+        </div>
+      </div>
+
+      <!-- Contribution Calendar -->
+      <div class="calendar-container" id="calendarContainer">
+        <div class="calendar-header">
+          <h3 class="calendar-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="calendar-title-icon">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+              <line x1="16" y1="2" x2="16" y2="6"/>
+              <line x1="8" y1="2" x2="8" y2="6"/>
+              <line x1="3" y1="10" x2="21" y2="10"/>
+            </svg>
+            <span id="calendarTotalLabel">0 hours in the last year</span>
+          </h3>
+        </div>
+        <div class="calendar-scroll">
+          <div class="calendar-months" id="calendarMonths"></div>
+          <div class="calendar-grid-wrap">
+            <div class="calendar-day-labels">
+              <span></span>
+              <span>Mon</span>
+              <span></span>
+              <span>Wed</span>
+              <span></span>
+              <span>Fri</span>
+              <span></span>
+            </div>
+            <div class="calendar-grid" id="calendarGrid"></div>
+          </div>
+        </div>
+        <div class="calendar-legend">
+          <span class="calendar-legend-label">Less</span>
+          <div class="calendar-legend-square" data-level="0"></div>
+          <div class="calendar-legend-square" data-level="1"></div>
+          <div class="calendar-legend-square" data-level="2"></div>
+          <div class="calendar-legend-square" data-level="3"></div>
+          <div class="calendar-legend-square" data-level="4"></div>
+          <span class="calendar-legend-label">More</span>
+        </div>
+      </div>
+
+      <!-- Tracking Info -->
+      <div class="tracking-info" id="trackingInfo">
+        <p>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="info-icon">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="16" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12.01" y2="8"/>
+          </svg>
+          <span id="trackingSince">Tracking data builds up over time as we monitor online status</span>
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <!-- ─── Tooltip ─────────────────────────────────────────── -->
+  <div class="tooltip" id="tooltip"></div>
+
+  <!-- ─── Footer ──────────────────────────────────────────── -->
+  <footer class="footer">
+    <p>Built with ♥ for the VRChat community &bull; Data updates every 5 minutes</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
